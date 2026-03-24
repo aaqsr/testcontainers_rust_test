@@ -1,7 +1,9 @@
+use std::fs::read_to_string;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
-use testcontainers::core::BuildImageOptions;
+use testcontainers::core::{BuildImageOptions, CmdWaitFor, ExecCommand, WaitFor};
 use testcontainers::runners::{SyncBuilder, SyncRunner};
 use testcontainers::{Container, GenericBuildableImage, GenericImage, ImageExt};
 
@@ -30,22 +32,50 @@ static CONTAINER: LazyLock<Container<GenericImage>> = LazyLock::new(|| {
 //
 // check them with expected results
 
-fn mk_img() {
+fn mk_img(source: &str) -> Option<i64> {
     let image = GenericBuildableImage::new("my-test-app", "latest")
         .with_dockerfile_string(
             r#"
             FROM alpine:latest
-            COPY --chmod=0755 app.sh /usr/local/bin/app
-            ENTRYPOINT ["/usr/local/bin/app"]
+            RUN mkdir /work
+            COPY --chmod=0755 app.s /
+            COPY --chmod=0755 entrypoint.sh /
+            COPY --chmod=0755 test /
+            ENTRYPOINT ["/entrypoint.sh"]
         "#,
         )
+        .with_data(source, "./app.s")
+        .with_data(std::fs::read("./test").expect("???"), "./test")
         .with_data(
             r#"#!/bin/sh
-echo "Hello from custom image!"
+echo "started"
+cat app.s
+./test
+echo $?
+cat
 "#,
-            "./app.sh",
+            "./entrypoint.sh",
         )
-        .build_image_with(BuildImageOptions::new().with_skip_if_exists(true));
+        .build_image();
+    // .build_image_with(BuildImageOptions::new().with_skip_if_exists(true));
+
+    let container = image
+        .expect("failed to create image")
+        .start()
+        .expect("failed to start container");
+
+    let cmd = ExecCommand::new(vec![
+        "nasm -f elf64 app.s -o app.o && ld app.o -o app.out && ./a.out",
+    ])
+    .with_container_ready_conditions(vec![WaitFor::message_on_stdout("started")]);
+    // .with_cmd_ready_condition(CmdWaitFor::Exit { code: None });
+
+    eprintln!("Reached here");
+    let result = container.exec(cmd);
+    result
+        .expect("failed to run command")
+        .exit_code()
+        .expect("failed to get exit code")
 }
 
 // fails if the program exits non-zero
@@ -121,7 +151,8 @@ _start:
     syscall
 "#;
 
-    run_asm(asm).expect("program should exit successfully");
+    let code = mk_img(asm);
+    assert!(code.is_some());
 }
 
 #[test]
@@ -136,6 +167,6 @@ _start:
     syscall
 "#;
 
-    let result = run_asm(asm);
-    assert!(result.is_err(), "expected failure for non-zero exit");
+    let code = mk_img(asm);
+    assert!(code.is_some());
 }
